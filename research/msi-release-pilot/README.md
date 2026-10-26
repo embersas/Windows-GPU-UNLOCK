@@ -124,3 +124,25 @@ profile for shared PCI checks; `checks.c` uses its target bus. Normal builds
 retain bus 1 and their existing hardware/profile guards. Existing
 `machine-profile.h`, `full-release.c`, installers and firmware assets are
 unchanged. The upstream copyright notices and GPL-2.0-only licensing apply.
+
+## Maintainer integration review (26 October 2026)
+
+The integration branch includes upstream main `5c98f11` (diagnostic-hardening
+PR #37). The pilot's incompatible-profile guard now also rejects the X870,
+B660-PLUS, H610M, H610M observation and local-profile definitions. The public
+guard runner covers the existing production profiles as well as these additions:
+one positive control and 17 incompatible-build cases.
+
+The Windows Clang 20/MSVC2019 host review passed 489 adversarial cases and
+55 safety/evidence cases, with 564,693 assertions. Twelve production object
+pairs across five published profiles and a synthetic local-profile definition
+were identical after normalizing only the COFF timestamp. The host link map
+also checked the expected entry/core symbols and absence of prohibited
+capabilities; real-profile freestanding entry/core objects compiled.
+
+The subsequent merge of `5c98f11` changes no files under `internal-boot` or
+`research/msi-release-pilot` relative to that tested integration, apart from
+this review note. Linux ASan/UBSan and the 15 VFS overlay controls were not
+rerun in the Windows review. No physical Stage 1 run, EFI boot, keyboard
+continuity, Windows recovery or hardware safety is established. The contribution
+remains Draft pending the source-readiness and final merge decisions.
