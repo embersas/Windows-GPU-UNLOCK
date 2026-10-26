@@ -25,6 +25,9 @@ typedef struct {
   UINT32 Config[64],Cold[9];
   EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR Bar;
   UINT64 Attributes;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  UINT64 RestoredAttributes; /* Separate from the immutable capture baseline. */
+#endif
   BOOLEAN Captured,Released,Owned,Restored;
 #ifdef GU_HEADLESS_RESEARCH
   EFI_HANDLE Children[GU_HEADLESS_MAX_DISPLAY_CHILDREN];
@@ -162,9 +165,19 @@ static EFI_STATUS Prom(VOID) {
   UINT8 *data=NULL;EFI_STATUS s=bs->AllocatePool(EfiBootServicesData,1048576,(VOID **)&data);
   if(s!=EFI_SUCCESS || !data)return EFI_OUT_OF_RESOURCES;
   if(!io->Mem.Read)s=EFI_UNSUPPORTED;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  UINT32 cfg[64];
+  if(s==EFI_SUCCESS)s=ReadConfigFull(cfg);
+  if(s==EFI_SUCCESS && ((cfg[1]&7U)!=2U || !Bytes(cfg,Full.Config,sizeof(cfg))))s=EFI_NOT_READY;
+#endif
   for(UINTN at=0;s==EFI_SUCCESS && at<1048576;at+=65536)s=io->Mem.Read(io,EfiPciIoWidthUint8,0,0x300000+at,65536,data+at);
   if(s==EFI_SUCCESS && !GuHashMatches(data,1048576,GU_PROM_SHA256))s=EFI_CRC_ERROR;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  EFI_STATUS freed=bs->FreePool(data);
+  if(s==EFI_SUCCESS)s=freed;
+#else
   if(bs->FreePool(data)!=EFI_SUCCESS)s=EFI_DEVICE_ERROR;
+#endif
   return s;
 }
 static BOOLEAN CodeRange(UINTN base,UINT64 size,UINTN rva,UINTN bytes,UINTN stop) {
@@ -313,6 +326,9 @@ static EFI_STATUS FullConsumers(const GRAPH *g) {
     else return EFI_ACCESS_DENIED;
   }
   if(owners!=1 || !children || Full.NvAgent==Full.Image)return EFI_ACCESS_DENIED;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  if(children!=1)return EFI_ACCESS_DENIED;
+#endif
   Full.ChildCount=children;
   UINTN consoleChild=children;
   for(UINTN c=0;c<children;c++) {
@@ -344,6 +360,9 @@ static EFI_STATUS FullConsumers(const GRAPH *g) {
     for(UINTN i=0;i<g->Count;i++) {
       const EDGE *e=&g->Edges[i];
       if(e->Handle==PreparedPlan.RtxPci && e->Agent!=Full.NvAgent)return EFI_ACCESS_DENIED;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+      if(e->Agent==Full.NvAgent && e->Handle!=PreparedPlan.RtxPci)return EFI_ACCESS_DENIED;
+#endif
       if(e->Handle!=Full.Children[c])continue;
 #if GU_NO_EDID_DRIVER
       /* No EDID driver is bound on this firmware and the console drivers were detached before
@@ -532,12 +551,33 @@ static EFI_STATUS CapturePermit(VOID) {
   s=Note("capture-cold",Cold(Full.Cold));if(s!=EFI_SUCCESS)return s;
   EFI_PCI_IO_PROTOCOL *io=PreparedPlan.RtxIo;
   if(s==EFI_SUCCESS && !io->Attributes)s=EFI_UNSUPPORTED;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  if(s==EFI_SUCCESS)s=Note("msi-capture-attributes-read",io->Attributes(io,EfiPciIoAttributeOperationGet,0,&Full.Attributes));
+#else
   if(s==EFI_SUCCESS)s=io->Attributes(io,EfiPciIoAttributeOperationGet,0,&Full.Attributes);
+#endif
   UINT64 expected=(Full.Config[1]&1?EFI_PCI_IO_ATTRIBUTE_IO:0)|(Full.Config[1]&2?EFI_PCI_IO_ATTRIBUTE_MEMORY:0);
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  (void)expected;
+  if(s==EFI_SUCCESS)s=Full.Log(Full.Context,"msi-capture-attributes-value",Full.Attributes);
+  if(s==EFI_SUCCESS)s=Note("msi-capture-attributes-pair",
+    (Full.Config[1]&7U)==2U && Full.Attributes==0x300ULL?EFI_SUCCESS:EFI_NOT_READY);
+#else
   if(s==EFI_SUCCESS && (Full.Attributes&(EFI_PCI_IO_ATTRIBUTE_IO|EFI_PCI_IO_ATTRIBUTE_MEMORY|EFI_PCI_IO_ATTRIBUTE_BUS_MASTER))!=expected)s=EFI_NOT_READY;
+#endif
   if(s==EFI_SUCCESS)Full.Captured=TRUE;
   return s;
 }
+#ifdef GU_PROFILE_MSI_X570_3080TI
+/* Proposed MSI contract: raw IO/BME stay off; raw MEM and cached MEM agree.
+ * The cached IO bit may survive Stop or be cleared. No other attribute bit
+ * is accepted. GuDecodeRestoreMask independently pins all 64 config words.
+ * This is a host-only model awaiting review and hardware evidence. */
+static BOOLEAN MsiAttributes(UINT32 command,UINT64 attributes) {
+  return (command&5U)==0 && !(attributes&~0x300ULL) &&
+    ((attributes&EFI_PCI_IO_ATTRIBUTE_MEMORY)!=0)==((command&2U)!=0);
+}
+#endif
 static EFI_STATUS RestoreDecode(VOID) {
   if(!Full.Captured || !Full.Released || Full.Owned)return EFI_ACCESS_DENIED;
   EFI_BOOT_SERVICES *bs=Full.Table->BootServices;EFI_PCI_IO_PROTOCOL *io=NULL;
@@ -558,9 +598,19 @@ static EFI_STATUS RestoreDecode(VOID) {
   UINT32 cfg[64]={0};UINT64 needed=0,supported=0,attrs=0;
   if(s==EFI_SUCCESS)s=ReadConfigFull(cfg);
   if(s==EFI_SUCCESS && !GuDecodeRestoreMask(Full.Config,cfg,&needed))s=EFI_UNSUPPORTED;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  if(s==EFI_SUCCESS)s=Note("msi-post-stop-attributes-read",io->Attributes(io,EfiPciIoAttributeOperationGet,0,&attrs));
+#else
   if(s==EFI_SUCCESS)s=io->Attributes(io,EfiPciIoAttributeOperationGet,0,&attrs);
+#endif
   UINT64 expected=Full.Attributes & ~((Full.Config[1]&~cfg[1]&1?EFI_PCI_IO_ATTRIBUTE_IO:0)|(Full.Config[1]&~cfg[1]&2?EFI_PCI_IO_ATTRIBUTE_MEMORY:0));
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  if(s==EFI_SUCCESS)s=Full.Log(Full.Context,"msi-post-stop-attributes-value",attrs);
+  if(s==EFI_SUCCESS)s=Note("msi-post-stop-attributes-pair",MsiAttributes(cfg[1],attrs)?EFI_SUCCESS:EFI_NOT_READY);
+  expected=attrs; /* Pin this distinct observation across the intent callback. */
+#else
   if(s==EFI_SUCCESS && attrs!=expected)s=EFI_NOT_READY;
+#endif
   if(s==EFI_SUCCESS)s=io->Attributes(io,EfiPciIoAttributeOperationSupported,0,&supported);
   if(s==EFI_SUCCESS && (supported&needed)!=needed)s=EFI_UNSUPPORTED;
   if(s==EFI_SUCCESS)s=Note("pci-decode-restore-intent-io-mem-only",EFI_SUCCESS);
@@ -581,7 +631,12 @@ static EFI_STATUS RestoreDecode(VOID) {
   if(s==EFI_SUCCESS)s=ReadConfigFull(cfg);
   if(s==EFI_SUCCESS && !Bytes(cfg,Full.Config,sizeof(cfg)))s=EFI_NOT_READY;
   if(s==EFI_SUCCESS)s=io->Attributes(io,EfiPciIoAttributeOperationGet,0,&attrs);
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  if(s==EFI_SUCCESS && (!MsiAttributes(cfg[1],attrs) || attrs!=(expected|needed)))s=EFI_NOT_READY;
+  if(s==EFI_SUCCESS)Full.RestoredAttributes=attrs;
+#else
   if(s==EFI_SUCCESS && attrs!=Full.Attributes)s=EFI_NOT_READY;
+#endif
   if(s==EFI_SUCCESS)s=CheckBar(FALSE);
   if(s==EFI_SUCCESS)s=Prom();
   UINT32 cold[9];
@@ -642,6 +697,14 @@ EFI_STATUS GuReleaseGop(EFI_SYSTEM_TABLE *t,EFI_HANDLE image,GU_PREPARE_LOG log,
 #endif
     bs->RestoreTPL(old);
     if(s!=EFI_SUCCESS)return Note("full-release-recheck-failed",s);
+#ifdef GU_PROFILE_MSI_X570_3080TI
+    /* Cache changes are permitted only across Stop, not during intent/rechecks.
+     * No successful-path logging occurs between this read and the call. */
+    UINT64 preStopAttributes=0;
+    s=PreparedPlan.RtxIo->Attributes(PreparedPlan.RtxIo,EfiPciIoAttributeOperationGet,0,&preStopAttributes);
+    if(s!=EFI_SUCCESS)return Note("msi-pre-stop-attributes-read",s);
+    if(preStopAttributes!=Full.Attributes)return Note("msi-pre-stop-attributes-match",EFI_NOT_READY);
+#endif
 #ifdef GU_HEADLESS_RESEARCH
     s=bs->DisconnectController(stage==3?Full.Children[child]:PreparedPlan.RtxPci,stage==3?Full.EdidAgent:Full.NvAgent,NULL);
     if(s==EFI_SUCCESS && stage==3)Full.EdidDetached++;
@@ -700,7 +763,11 @@ EFI_STATUS GuVerifyReleased(EFI_SYSTEM_TABLE *t,BOOLEAN checkCold) {
   VERIFY_STEP("verify-bar",CheckBar(FALSE));
   UINT64 attrs=0;
   VERIFY_STEP("verify-pci-attributes-read",PreparedPlan.RtxIo->Attributes(PreparedPlan.RtxIo,EfiPciIoAttributeOperationGet,0,&attrs));
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  VERIFY_STEP("verify-pci-attributes-match",attrs==Full.RestoredAttributes?EFI_SUCCESS:EFI_NOT_READY);
+#else
   VERIFY_STEP("verify-pci-attributes-match",attrs==Full.Attributes?EFI_SUCCESS:EFI_NOT_READY);
+#endif
   if(checkCold) {
     VERIFY_STEP("verify-cold-read",Cold(cold));
     VERIFY_STEP("verify-cold-match",Bytes(cold,Full.Cold,sizeof(cold))?EFI_SUCCESS:EFI_NOT_READY);

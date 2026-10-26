@@ -8,7 +8,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef GU_SINGLE_RTX_CONSOLE
+#ifdef GU_MSI_REPLAY_TEST
+#include "msi-replay-fixture.h"
+static VOID SetupMsi(VOID);
+static EFI_STATUS MsiConsoleStop(EFI_HANDLE,EFI_HANDLE,EFI_HANDLE);
+static EFI_STATUS MsiProtocol(EFI_HANDLE,EFI_GUID *,VOID **);
+static BOOLEAN MsiGopInstalled(VOID);
+static VOID MsiRestore(VOID);
+static VOID MsiAllocate(UINTN);
+static VOID MsiAllocated(UINTN,VOID *);
+static EFI_STATUS MsiFree(VOID *);
+#elif defined(GU_SINGLE_RTX_CONSOLE)
 #include "build/r2/replay-fixture.h"
 #else
 #include "build/console/replay-fixture.h"
@@ -32,7 +42,7 @@ static UINT8 TestAmdPath[36],TestRtxPath[36];
 static EFI_GUID Dummy={0x12345678,0,0,{0}};
 #ifdef GU_FULL_REPLAY_TEST
 static BOOLEAN FullMode;
-#ifdef GU_HEADLESS_RESEARCH
+#if defined(GU_HEADLESS_RESEARCH) && !defined(GU_MSI_REPLAY_TEST)
 static BOOLEAN PhaseForHeadlessTest(VOID);
 #endif
 static EFI_STATUS ExtraHandle(EFI_HANDLE h,EFI_GUID *g,VOID **out);
@@ -43,10 +53,28 @@ static EFI_STATUS ExtraDisconnect(EFI_HANDLE h,EFI_HANDLE agent,EFI_HANDLE child
 static void Check(int condition,const char *name) {
   Checks++;if(!condition){fprintf(stderr,"FAIL %s scenario=%d calls=%d\n",name,Scenario,Calls);exit(1);}
 }
-static EFI_STATUS EFIAPI Allocate(EFI_MEMORY_TYPE type,UINTN n,VOID **p) {(void)type;*p=malloc(n);return *p?EFI_SUCCESS:EFI_OUT_OF_RESOURCES;}
-static EFI_STATUS EFIAPI Free(VOID *p) {free(p);return EFI_SUCCESS;}
+static EFI_STATUS EFIAPI Allocate(EFI_MEMORY_TYPE type,UINTN n,VOID **p) {(void)type;
+#ifdef GU_MSI_REPLAY_TEST
+ MsiAllocate(n);
+#endif
+ *p=malloc(n);
+#ifdef GU_MSI_REPLAY_TEST
+ MsiAllocated(n,*p);
+#endif
+ return *p?EFI_SUCCESS:EFI_OUT_OF_RESOURCES;}
+static EFI_STATUS EFIAPI Free(VOID *p) {
+#ifdef GU_MSI_REPLAY_TEST
+ EFI_STATUS s=MsiFree(p);free(p);return s;
+#else
+ free(p);return EFI_SUCCESS;
+#endif
+}
 static EFI_TPL EFIAPI Raise(EFI_TPL x) {(void)x;return TPL_APPLICATION;}
-static VOID EFIAPI Restore(EFI_TPL x) {(void)x;}
+static VOID EFIAPI Restore(EFI_TPL x) {(void)x;
+#ifdef GU_MSI_REPLAY_TEST
+ MsiRestore();
+#endif
+}
 static EFI_STATUS EFIAPI Locate(EFI_LOCATE_SEARCH_TYPE search,EFI_GUID *g,VOID *key,UINTN *n,EFI_HANDLE **out) {
   (void)key;
   if(search==AllHandles) {
@@ -56,7 +84,11 @@ static EFI_STATUS EFIAPI Locate(EFI_LOCATE_SEARCH_TYPE search,EFI_GUID *g,VOID *
     Check(GuGuidEqual(g,&GopGuid),"only GOP-specific enumeration");
 #ifdef GU_SINGLE_RTX_CONSOLE
 #ifdef GU_HEADLESS_RESEARCH
+#ifdef GU_MSI_REPLAY_TEST
+    if(!MsiGopInstalled()) {*n=0;*out=NULL;return EFI_NOT_FOUND;}
+#else
     if(FullMode && PhaseForHeadlessTest()) {*n=0;*out=NULL;return EFI_NOT_FOUND;}
+#endif
 #endif
     *n=Scenario==9?2:1;
     *out=malloc(*n*sizeof(**out));(*out)[0]=FX_Rtx;
@@ -101,6 +133,9 @@ static EFI_STATUS EFIAPI Output(EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *out,CHAR16 *s) 
 }
 static EFI_STATUS EFIAPI Handle(EFI_HANDLE h,EFI_GUID *g,VOID **out) {
   *out=NULL;
+#ifdef GU_MSI_REPLAY_TEST
+  EFI_STATUS msi=MsiProtocol(h,g,out);if(msi!=EFI_NOT_FOUND)return msi;
+#endif
 #ifdef GU_FULL_REPLAY_TEST
   if(FullMode) {
     EFI_STATUS extra=ExtraHandle(h,g,out);if(extra!=EFI_NOT_FOUND)return extra;
@@ -158,6 +193,9 @@ static VOID Drop(EFI_HANDLE handle,EFI_HANDLE agent,EFI_GUID *g) {
   Live.Count=n;
 }
 static EFI_STATUS EFIAPI Disconnect(EFI_HANDLE controller,EFI_HANDLE agent,EFI_HANDLE child) {
+#ifdef GU_MSI_REPLAY_TEST
+  if(!FullMode || Calls<2)return MsiConsoleStop(controller,agent,child);
+#endif
 #ifdef GU_FULL_REPLAY_TEST
   if(FullMode && Calls>=2)return ExtraDisconnect(controller,agent,child);
 #endif
@@ -229,6 +267,9 @@ static EFI_STATUS Run(int scenario) {
   if(scenario==8)OutBinding.Version=0x11;
   t.BootServices=&bs;t.ConsoleOutHandle=FX_Console;t.StandardErrorHandle=FX_Error;t.ConsoleInHandle=FX_Input;
   t.ConOut=&Text;t.StdErr=&Text;t.ConIn=&Keys;
+#ifdef GU_MSI_REPLAY_TEST
+  SetupMsi();
+#endif
   return GuPrepareConsole(&t,Log,NULL);
 }
 typedef struct {

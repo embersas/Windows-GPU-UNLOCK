@@ -6,6 +6,9 @@
  */
 #include "prepare-console.h"
 #include "../unlock/machine-profile.h"
+#ifdef GU_PROFILE_MSI_X570_3080TI
+#include "../unlock/sha256.h"
+#endif
 #include "media.h"
 #include <Protocol/GraphicsOutput.h>
 #include <Protocol/PciIo.h>
@@ -273,6 +276,14 @@ static EFI_STATUS Driver(EFI_BOOT_SERVICES *bs,EFI_HANDLE agent,const EFI_GUID *
   UINTN n=0;
   if(!GuInspectPath(im->FilePath,NULL,&n,NULL,NULL) || n!=24 || im->FilePath->Type!=MEDIA_DEVICE_PATH || im->FilePath->SubType!=MEDIA_PIWG_FW_FILE_DP ||
      im->FilePath->Length[0]!=20 || im->FilePath->Length[1] || !GuGuidEqual((UINT8 *)im->FilePath+4,file))return EFI_UNSUPPORTED;
+#ifdef GU_PROFILE_MSI_X570_3080TI
+  BOOLEAN text=GuGuidEqual(file,&OutFile),gfx=GuGuidEqual(file,&GfxFile);
+  if(!text && !gfx)return EFI_UNSUPPORTED;
+  UINTN bytes=text?GU_CONSOLE_TEXT_BYTES:GU_CONSOLE_GFX_BYTES;
+  const char *hash=text?GU_CONSOLE_TEXT_SHA256:GU_CONSOLE_GFX_SHA256;
+  if(0x2a0U+bytes>im->ImageSize)return EFI_UNSUPPORTED;
+  if(!GuHashMatches((UINT8 *)im->ImageBase+0x2a0,bytes,hash))return EFI_CRC_ERROR;
+#endif
   return EFI_SUCCESS;
 }
 #if GU_CONSOLE_AGGREGATE
